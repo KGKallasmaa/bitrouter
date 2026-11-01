@@ -2,11 +2,13 @@
 use super::*;
 
 async fn fault(db: &DatabaseConnection) -> Result<()> {
+    // The paid terminal update follows the receipt insert in the same repair
+    // transaction. Keep startup's protected receipt schema intact.
     for sql in [
         "PRAGMA foreign_keys=ON",
         "CREATE TABLE native_paid_repair_fk_parent(id INTEGER PRIMARY KEY)",
         "CREATE TABLE native_paid_repair_fk_child(id INTEGER REFERENCES native_paid_repair_fk_parent(id) DEFERRABLE INITIALLY DEFERRED)",
-        "CREATE TRIGGER native_paid_repair_commit_fault AFTER INSERT ON tenancy_execution_receipts WHEN EXISTS (SELECT 1 FROM checkpoint_evolution WHERE kind='owned_judge_active_v3' AND json_extract(body,'$.version')=4 AND json_extract(body,'$.execution')=NEW.execution_id) BEGIN INSERT INTO native_paid_repair_fk_child(id) VALUES(1); END",
+        "CREATE TRIGGER native_paid_repair_commit_fault AFTER UPDATE ON checkpoint_evolution WHEN OLD.kind='owned_judge_active_v3' AND NEW.kind='owned_judge_job' AND json_extract(OLD.body,'$.version')=4 BEGIN INSERT INTO native_paid_repair_fk_child(id) VALUES(1); END",
     ] {
         db.execute_unprepared(sql).await?;
     }

@@ -27,11 +27,13 @@ async fn commit_fault(db: &sea_orm::DatabaseConnection) -> Result<()> {
     // The owned SQLite profile has one physical writer. This is a real deferred
     // FK violation, whose INSERT succeeds and whose consuming COMMIT fails.
     // No error string, disposition, terminal or Seed is supplied by the fixture.
+    // Fault the paid terminal update in the same repair transaction, after its
+    // receipt insert, without invalidating the protected receipt schema at startup.
     for sql in [
         "PRAGMA foreign_keys=ON",
         "CREATE TABLE paid_repair_fk_parent(id INTEGER PRIMARY KEY)",
         "CREATE TABLE paid_repair_fk_child(id INTEGER REFERENCES paid_repair_fk_parent(id) DEFERRABLE INITIALLY DEFERRED)",
-        "CREATE TRIGGER paid_repair_commit_fault AFTER INSERT ON tenancy_execution_receipts WHEN EXISTS (SELECT 1 FROM checkpoint_evolution WHERE kind='owned_judge_active_v3' AND json_extract(body,'$.execution')=NEW.execution_id) BEGIN INSERT INTO paid_repair_fk_child(id) VALUES(1); END",
+        "CREATE TRIGGER paid_repair_commit_fault AFTER UPDATE ON checkpoint_evolution WHEN OLD.kind='owned_judge_active_v3' AND NEW.kind='owned_judge_job' BEGIN INSERT INTO paid_repair_fk_child(id) VALUES(1); END",
     ] {
         db.execute_unprepared(sql).await?;
     }

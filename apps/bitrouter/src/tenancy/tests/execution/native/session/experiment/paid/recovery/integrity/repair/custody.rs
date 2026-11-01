@@ -12,12 +12,16 @@ async fn opener() -> Result<()> {
     ));
     let (database, db, original, _) = begin_fixture(&root).await?;
     if mode == "rollback" {
-        // Missing035 repair actually inserts this original paid terminal. The
-        // trigger ends SQLite's transaction; H's consuming rollback must fail.
-        db.execute_unprepared("CREATE TRIGGER native_paid_repair_rollback BEFORE INSERT ON tenancy_execution_receipts \
-            WHEN EXISTS (SELECT 1 FROM checkpoint_evolution WHERE kind='owned_judge_active_v3' \
-            AND json_extract(body,'$.version')=4 AND json_extract(body,'$.execution')=NEW.execution_id) \
-            BEGIN SELECT RAISE(ROLLBACK, 'native paid repair rollback fixture'); END").await?;
+        // Repair updates the paid terminal after inserting its receipt. Fault
+        // that same transaction without changing the protected receipt schema;
+        // the trigger ends it, so H's consuming rollback must fail.
+        db.execute_unprepared(
+            "CREATE TRIGGER native_paid_repair_rollback BEFORE UPDATE ON checkpoint_evolution \
+            WHEN OLD.kind='owned_judge_active_v3' AND NEW.kind='owned_judge_job' \
+            AND json_extract(OLD.body,'$.version')=4 \
+            BEGIN SELECT RAISE(ROLLBACK, 'native paid repair rollback fixture'); END",
+        )
+        .await?;
     }
     let before = state::snapshot(&db).await?;
     let (attached, receive) = tokio::sync::oneshot::channel();
