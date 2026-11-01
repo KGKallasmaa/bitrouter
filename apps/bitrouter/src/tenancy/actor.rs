@@ -68,7 +68,9 @@ pub(super) enum Job {
     OAuth(Box<super::oauth::exchange::Job>),
     Command(Box<Message>),
     Credential(CredentialRead),
+    Directory(super::directory::Read),
     Receipt(Arc<super::receipts::owner::Owner>),
+    OrderedIntent(super::receipts::ordered::IntentJob),
     ReceiptRead(super::receipts::read::Read),
     Continuation(Box<super::continuation::http::Job>),
     #[cfg(feature = "core")]
@@ -154,7 +156,7 @@ impl Default for OperationLimits {
 }
 
 impl Worker {
-    fn current(&self) -> Result<Arc<Snapshot>, Failure> {
+    pub(super) fn current(&self) -> Result<Arc<Snapshot>, Failure> {
         if !self.live.0.load(Ordering::Acquire) {
             return Err(ErrorCode::AuthorityUnavailable.into());
         }
@@ -164,7 +166,7 @@ impl Worker {
             .map_err(|_| ErrorCode::AuthorityUnavailable.into())
     }
 
-    fn unavailable(&self, code: ErrorCode) -> Failure {
+    pub(super) fn unavailable(&self, code: ErrorCode) -> Failure {
         self.live.0.store(false, Ordering::Release);
         code.into()
     }
@@ -348,5 +350,43 @@ impl Worker {
         } else {
             Err(ErrorCode::AuthorityUnavailable.into())
         }
+    }
+}
+
+impl Worker {
+    pub(super) async fn execute_ordered_intent(
+        &self,
+        job: &super::receipts::ordered::IntentJob,
+        control: &Control,
+    ) -> Result<(), Failure> {
+        let owner = &job.owner;
+        let state = self.current()?;
+        if !Arc::ptr_eq(&owner.origin, &self.proof) || owner.installation() != &state.installation {
+            return Err(ErrorCode::AuthorityUnavailable.into());
+        }
+        let intent = owner
+            .intent
+            .get()
+            .ok_or_else(|| Failure::from(ErrorCode::AuthorityUnavailable))?;
+        let tx = control
+            .begin(&self.db)
+            .await
+            .map_err(|_| Failure::from(ErrorCode::StorageUnavailable))?;
+        let result = super::receipts::ordered::intent::insert(&tx, intent).await;
+        if result.is_err() {
+            control
+                .rollback(tx)
+                .await
+                .map_err(|_| self.unavailable(ErrorCode::StorageUnavailable))?;
+            return Err(ErrorCode::StorageUnavailable.into());
+        }
+        control
+            .commit(tx)
+            .await
+            .map_err(|_| self.unavailable(ErrorCode::StorageUnavailable))?;
+        // Persisting an admitted identity is cleanup, even if its caller has
+        // already cancelled. It never grants the cancelled owner a send.
+        owner.intent_committed();
+        Ok(())
     }
 }

@@ -1,5 +1,7 @@
 //! Normalized authority storage; command results and authority commit together.
 
+pub(super) mod directory;
+
 use anyhow::{Context, Result, ensure};
 use bitrouter_ai::tenancy::{
     authority::{CredentialIssued, CredentialState},
@@ -133,7 +135,7 @@ async fn installation(db: &impl ConnectionTrait, state: &Snapshot) -> Result<()>
         vec![
             ("singleton", 1_i32.into()),
             ("installation_id", state.installation.as_str().into()),
-            ("schema_version", 1_i32.into()),
+            ("schema_version", 2_i32.into()),
             (
                 "authority_revision",
                 i64::try_from(state.revision.get())?.into(),
@@ -562,7 +564,7 @@ pub(super) async fn load_existing(
 
 fn existing_identity(row: &QueryResult) -> Result<Snapshot> {
     ensure!(
-        row.try_get::<i32>("", "singleton")? == 1 && row.try_get::<i32>("", "schema_version")? == 1,
+        row.try_get::<i32>("", "singleton")? == 1 && row.try_get::<i32>("", "schema_version")? == 2,
         "unsupported authority store identity"
     );
     let operations = u32::try_from(row.try_get::<i32>("", "operation_ids")?)?;

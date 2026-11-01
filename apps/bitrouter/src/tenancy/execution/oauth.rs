@@ -24,6 +24,9 @@ impl TenantExecution {
             .with_dispatch_authority(&self.submission, |state| {
                 authorize_route(state, &self.submission, self.route.dependencies())?;
                 let profile = self.service.oauth.get(self.installation_id(), &reference)?;
+                if self.route.is_ordered() && profile.is_some() {
+                    return Err(ErrorCode::CapabilityMismatch);
+                }
                 if let Some(metadata) = &profile {
                     self.route.require_oauth_messages(target)?;
                     if metadata.profile.provider != target.provider_name

@@ -37,6 +37,9 @@ impl Service {
             return Err(ErrorCode::InvalidRequest.into());
         }
         let identity = self.submission(headers)?;
+        if identity.binding.selection.is_some() {
+            return Err(ErrorCode::CapabilityMismatch.into());
+        }
         let (credential_scope, binding_scope) = self
             .with_dispatch_authority(&identity, |state| {
                 let effective = state.effective(&identity.caller, &identity.tenant, Utc::now())?;

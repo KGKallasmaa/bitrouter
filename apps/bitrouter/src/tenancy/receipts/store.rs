@@ -9,7 +9,7 @@ use bitrouter_ai::tenancy::{
 };
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseTransaction, QueryResult, SqlErr,
-    sea_query::{Alias, Asterisk, Expr, OnConflict, Order, Query, SelectStatement},
+    sea_query::{Alias, Expr, OnConflict, Order, Query, SelectStatement},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,9 +17,11 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 mod tests;
 
+pub(in crate::tenancy) mod format;
+
 const TABLE: &str = "tenancy_execution_receipts";
-const MAX_RECEIPT: usize = 1024 * 1024;
-const MAX_DISPOSITION: usize = 1024;
+pub(super) const MAX_RECEIPT: usize = 1024 * 1024;
+pub(super) const MAX_DISPOSITION: usize = 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,13 +36,13 @@ pub(in crate::tenancy) struct Disposition {
 // or forcing unrelated receipt producers to fabricate observation evidence.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredDisposition {
-    dispatch: DispatchState,
-    statuses: Vec<Option<u16>>,
+pub(super) struct StoredDisposition {
+    pub(super) dispatch: DispatchState,
+    pub(super) statuses: Vec<Option<u16>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    auxiliary_digest: Option<String>,
+    pub(super) auxiliary_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    usage_evidence_digest: Option<String>,
+    pub(super) usage_evidence_digest: Option<String>,
 }
 impl From<Disposition> for StoredDisposition {
     fn from(value: Disposition) -> Self {
@@ -207,8 +209,14 @@ impl Candidate {
 }
 
 fn digest(json: &str, disposition: &str) -> String {
+    digest_for(format::Format::V1, json, disposition)
+}
+pub(super) fn digest_for(format: format::Format, json: &str, disposition: &str) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"bitrouter.receipt.immutable.v1");
+    hash.update(match format {
+        format::Format::V1 => b"bitrouter.receipt.immutable.v1",
+        format::Format::V2 => b"bitrouter.receipt.immutable.v2",
+    });
     for part in [json, disposition] {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
@@ -262,7 +270,7 @@ async fn bounded_row(
 ) -> Result<Option<QueryResult>> {
     let backend = db.get_database_backend();
     // Bound stored TEXT before transferring it; a corrupt cell is never materialized.
-    let length = oversized(backend);
+    let length = format!("({}) OR receipt_format NOT IN (1,2)", oversized(backend));
     let oversized = query
         .clone()
         .expr(Expr::val(1))
@@ -308,7 +316,35 @@ async fn bounded_row(
         let bytes = usize::try_from(metadata.try_get::<i64>("", "receipt_bytes")?)?;
         budget.charge(1, bytes)?;
     }
-    query.column(Asterisk).limit(1);
+    // Retain absolute transfer guards even if a cell changes after preflight.
+    for (name, max) in [
+        ("receipt_json", MAX_RECEIPT),
+        ("disposition_json", MAX_DISPOSITION),
+        ("installation_id", 128),
+        ("tenant_id", 128),
+        ("execution_id", 128),
+        ("principal_id", 128),
+        ("correlation_id", 128),
+        ("content_digest", 64),
+        ("recorded_at", 20),
+    ] {
+        query.expr_as(
+            Expr::cust(format!(
+                "CASE WHEN {} <= {max} THEN {name} ELSE NULL END",
+                octets(backend, name)
+            )),
+            Alias::new(name),
+        );
+    }
+    for name in ["receipt_format", "byte_count", "unknown_outcome"] {
+        let scalar = if backend == DatabaseBackend::Sqlite {
+            format!("CASE WHEN typeof({name})='integer' THEN {name} ELSE NULL END")
+        } else {
+            name.to_owned()
+        };
+        query.expr_as(Expr::cust(scalar), Alias::new(name));
+    }
+    query.limit(1);
     let value = db.query_one(backend.build(&query)).await?;
     if let Some(budget) = budget {
         budget.check()?;
@@ -327,6 +363,10 @@ fn decode(
     ensure!(
         json.len() <= MAX_RECEIPT && private.len() <= MAX_DISPOSITION,
         "receipt byte bound"
+    );
+    ensure!(
+        row.try_get::<i32>("", "receipt_format")? == 1,
+        "receipt format mismatch"
     );
     let candidate = Candidate::from_parts(
         serde_json::from_str(&json)?,
@@ -363,6 +403,7 @@ fn decode(
     Ok(candidate)
 }
 
+#[cfg(test)]
 pub(in crate::tenancy) async fn lookup(
     db: &impl ConnectionTrait,
     installation: &InstallationId,
@@ -385,6 +426,18 @@ pub(in crate::tenancy) async fn lookup_candidate(
     let Some(row) = row(db, point(installation, tenant, id)).await? else {
         return Ok(None);
     };
+    decode_candidate(db, row, installation, tenant, id)
+        .await
+        .map(Some)
+}
+
+async fn decode_candidate(
+    db: &impl ConnectionTrait,
+    row: QueryResult,
+    installation: &InstallationId,
+    tenant: &TenantId,
+    id: &ExecutionId,
+) -> Result<Candidate> {
     let mut candidate = decode(row, installation, tenant, id)?;
     let disposition: StoredDisposition = serde_json::from_str(&candidate.private_json)?;
     super::auxiliary_store::validate(db, &mut candidate, disposition.auxiliary_digest.as_deref())
@@ -395,7 +448,7 @@ pub(in crate::tenancy) async fn lookup_candidate(
         disposition.usage_evidence_digest.as_deref(),
     )
     .await?;
-    Ok(Some(candidate))
+    Ok(candidate)
 }
 
 /// The actor owns this transaction through confirmed commit/rollback. Reconciliation
@@ -404,44 +457,56 @@ pub(in crate::tenancy) async fn insert(
     tx: &DatabaseTransaction,
     candidate: &Candidate,
 ) -> Result<bool> {
-    let receipt = &candidate.receipt;
-    let existing = row(
+    let r = &candidate.receipt;
+    let facts = format::Facts {
+        installation: &r.installation_id,
+        tenant: &r.tenant_id,
+        principal: &r.principal_id,
+        execution: &r.execution_id,
+        correlation: &r.correlation_id,
+        recorded_at: &r.recorded_at,
+        state: r.state,
+    };
+    let changed = insert_bytes(
         tx,
-        point(
-            &receipt.installation_id,
-            &receipt.tenant_id,
-            &receipt.execution_id,
-        ),
+        Row {
+            facts,
+            format: format::Format::V1,
+            json: &candidate.json,
+            private: &candidate.private_json,
+            digest: &candidate.digest,
+        },
     )
     .await?;
-    if let Some(row) = existing {
-        let saved = decode(
-            row,
-            &receipt.installation_id,
-            &receipt.tenant_id,
-            &receipt.execution_id,
-        )?;
-        ensure!(
-            saved.digest == candidate.digest
-                && saved.json == candidate.json
-                && saved.private_json == candidate.private_json,
-            "immutable receipt conflict"
-        );
-        super::usage_evidence::storage::insert(tx, candidate, false).await?;
-        return Ok(false);
-    }
+    super::usage_evidence::storage::insert(tx, candidate, changed).await?;
+    Ok(changed)
+}
+
+struct Row<'a> {
+    facts: format::Facts<'a>,
+    format: format::Format,
+    json: &'a str,
+    private: &'a str,
+    digest: &'a str,
+}
+async fn insert_bytes(tx: &DatabaseTransaction, value: Row<'_>) -> Result<bool> {
+    let r = &value.facts;
     let fields: Vec<(&str, sea_orm::Value)> = vec![
-        ("installation_id", receipt.installation_id.as_str().into()),
-        ("tenant_id", receipt.tenant_id.as_str().into()),
-        ("execution_id", receipt.execution_id.as_str().into()),
-        ("principal_id", receipt.principal_id.as_str().into()),
-        ("correlation_id", receipt.correlation_id.as_str().into()),
-        ("receipt_json", candidate.json.clone().into()),
-        ("content_digest", candidate.digest.clone().into()),
-        ("disposition_json", candidate.private_json.clone().into()),
-        ("byte_count", i64::try_from(candidate.bytes())?.into()),
-        ("unknown_outcome", candidate.unknown().into()),
-        ("recorded_at", receipt.recorded_at.as_str().into()),
+        ("installation_id", r.installation.as_str().into()),
+        ("tenant_id", r.tenant.as_str().into()),
+        ("execution_id", r.execution.as_str().into()),
+        ("principal_id", r.principal.as_str().into()),
+        ("correlation_id", r.correlation.as_str().into()),
+        ("receipt_format", value.format.number().into()),
+        ("receipt_json", value.json.into()),
+        ("content_digest", value.digest.into()),
+        ("disposition_json", value.private.into()),
+        (
+            "byte_count",
+            i64::try_from(value.json.len() + value.private.len())?.into(),
+        ),
+        ("unknown_outcome", (r.state == ReceiptState::Unknown).into()),
+        ("recorded_at", r.recorded_at.as_str().into()),
     ];
     let mut query = Query::insert();
     query
@@ -465,29 +530,90 @@ pub(in crate::tenancy) async fn insert(
         }
         Err(error) => return Err(error.into()),
     };
-    let saved = decode(
-        row(
-            tx,
-            point(
-                &receipt.installation_id,
-                &receipt.tenant_id,
-                &receipt.execution_id,
-            ),
-        )
+    let saved = row(tx, point(r.installation, r.tenant, r.execution))
         .await?
-        .context("receipt physical collision")?,
-        &receipt.installation_id,
-        &receipt.tenant_id,
-        &receipt.execution_id,
-    )?;
+        .context("receipt physical collision")?;
     ensure!(
-        saved.digest == candidate.digest
-            && saved.json == candidate.json
-            && saved.private_json == candidate.private_json,
+        saved.try_get::<String>("", "receipt_json")? == value.json
+            && saved.try_get::<String>("", "disposition_json")? == value.private
+            && saved.try_get::<String>("", "content_digest")? == value.digest
+            && saved.try_get::<i32>("", "receipt_format")? == value.format.number(),
         "immutable receipt conflict"
     );
-    super::usage_evidence::storage::insert(tx, candidate, changed).await?;
+    validate_facts(&saved, r, value.json.len() + value.private.len())?;
     Ok(changed)
+}
+fn validate_facts(row: &QueryResult, facts: &format::Facts<'_>, bytes: usize) -> Result<()> {
+    for (column, value) in [
+        ("installation_id", facts.installation.as_str()),
+        ("tenant_id", facts.tenant.as_str()),
+        ("execution_id", facts.execution.as_str()),
+        ("principal_id", facts.principal.as_str()),
+        ("correlation_id", facts.correlation.as_str()),
+        ("recorded_at", facts.recorded_at.as_str()),
+    ] {
+        ensure!(
+            row.try_get::<String>("", column)? == value,
+            "receipt projection mismatch"
+        );
+    }
+    ensure!(
+        row.try_get::<i64>("", "byte_count")? == i64::try_from(bytes)?
+            && row.try_get::<bool>("", "unknown_outcome")?
+                == (facts.state == ReceiptState::Unknown),
+        "receipt accounting projection mismatch"
+    );
+    Ok(())
+}
+pub(super) fn validate_projection(row: &QueryResult, terminal: &format::Terminal) -> Result<()> {
+    ensure!(
+        row.try_get::<String>("", "content_digest")? == terminal.digest()
+            && row.try_get::<i32>("", "receipt_format")? == terminal.format().number(),
+        "receipt integrity mismatch"
+    );
+    validate_facts(row, &terminal.facts(), usize::try_from(terminal.bytes())?)
+}
+pub(in crate::tenancy) async fn insert_terminal(
+    tx: &DatabaseTransaction,
+    terminal: &format::Terminal,
+) -> Result<bool> {
+    match terminal {
+        format::Terminal::V1(candidate) => insert(tx, candidate).await,
+        format::Terminal::V2(candidate) => {
+            let changed = insert_bytes(
+                tx,
+                Row {
+                    facts: terminal.facts(),
+                    format: terminal.format(),
+                    json: terminal.json(),
+                    private: terminal.private_json(),
+                    digest: terminal.digest(),
+                },
+            )
+            .await?;
+            super::usage_evidence::storage::insert_v2(tx, candidate, changed).await?;
+            super::ordered::intent::retire(tx, candidate, changed).await?;
+            Ok(changed)
+        }
+    }
+}
+pub(in crate::tenancy) async fn lookup_terminal(
+    db: &impl ConnectionTrait,
+    installation: &InstallationId,
+    tenant: &TenantId,
+    id: &ExecutionId,
+) -> Result<Option<format::Terminal>> {
+    let Some(row) = row(db, point(installation, tenant, id)).await? else {
+        return Ok(None);
+    };
+    match format::Format::decode(row.try_get("", "receipt_format")?)? {
+        format::Format::V1 => Ok(Some(format::Terminal::V1(std::sync::Arc::new(
+            decode_candidate(db, row, installation, tenant, id).await?,
+        )))),
+        format::Format::V2 => Ok(Some(
+            super::ordered::decode(db, row, installation, tenant, id).await?,
+        )),
+    }
 }
 
 /// Caller supplies one stable read transaction and rechecks current permission
@@ -571,7 +697,7 @@ pub(in crate::tenancy) async fn inventory(
     // persistent schema bounds identity/index bytes; measure actual TEXT octets
     // before SUM. No payload is transferred during this check.
     let exact = format!(
-        "byte_count != {} + {} OR byte_count < 1 OR {}",
+        "byte_count != {} + {} OR byte_count < 1 OR receipt_format NOT IN (1,2) OR {}",
         octets(backend, "receipt_json"),
         octets(backend, "disposition_json"),
         oversized(backend)
@@ -690,11 +816,29 @@ pub(in crate::tenancy) async fn inventory(
     }
     let oauth_bytes = crate::tenancy::oauth::storage::inventory(db, installation).await?;
     let evidence_bytes = super::usage_evidence::storage::inventory(db, installation).await?;
+    let intents = super::ordered::intent::inventory(db, installation).await?;
+    count = count
+        .checked_add(intents.rows)
+        .context("intent inventory rows")?;
+    for (tenant, id, recorded) in intents.unknown {
+        ensure!(
+            !unknown.iter().any(|(t, e, _)| t == &tenant && e == &id),
+            "duplicate unknown obligation"
+        );
+        let count = counts.entry(tenant.clone()).or_default();
+        *count += 1;
+        ensure!(
+            *count <= 100 && unknown.len() < 1000,
+            "intent unknown capacity"
+        );
+        unknown.push((tenant, id, recorded));
+    }
     Ok(Inventory {
         bytes: u64::try_from(bytes)?
             .checked_add(aux_bytes)
             .and_then(|bytes| bytes.checked_add(oauth_bytes))
             .and_then(|bytes| bytes.checked_add(evidence_bytes))
+            .and_then(|bytes| bytes.checked_add(intents.bytes))
             .context("auxiliary receipt inventory overflow")?,
         rows: count,
         unknown,

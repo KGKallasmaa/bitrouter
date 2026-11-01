@@ -114,6 +114,23 @@ pub(crate) async fn dispatch(
 pub(crate) fn router(service: Service, operators: ControlAuth) -> Router {
     let router = Router::new()
         .route("/control/v1/tenancy/capabilities", get(capabilities))
+        .route("/control/v1/tenancy/directory", get(super::directory::http))
+        .route(
+            "/control/v1/tenancy/ordered/capabilities",
+            get(super::ordered::capabilities),
+        )
+        .route(
+            "/control/v1/tenancy/tenants/{tenant}/configurations/{revision}/candidates",
+            get(super::ordered::manifest),
+        )
+        .route(
+            "/control/v1/tenancy/tenants/{tenant}/executions/{execution}/v2",
+            get(super::ordered::receipt),
+        )
+        .route(
+            "/control/v1/tenancy/tenants/{tenant}/executions/{execution}/usage-evidence/v2",
+            get(super::ordered::evidence),
+        )
         .route(
             "/control/v1/tenancy/usage-evidence/capabilities",
             get(super::receipts::usage_evidence::http::capabilities),
@@ -264,6 +281,7 @@ async fn authenticate(
         let installation = one_header(request.headers(), "bitrouter-installation-id")?;
         if request.method() == Method::GET
             && request.uri().path() != "/control/v1/tenancy/capabilities"
+            && request.uri().path() != "/control/v1/tenancy/ordered/capabilities"
             && installation.is_none()
         {
             return Err(Failure::from(ErrorCode::InvalidRequest));

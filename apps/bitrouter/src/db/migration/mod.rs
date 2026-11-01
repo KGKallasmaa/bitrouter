@@ -51,6 +51,7 @@ mod m20240101_000037_owned_oauth;
 mod m20240101_000038_eval_import_provenance;
 mod m20240101_000039_resource_lifecycle;
 pub(crate) mod m20240101_000040_usage_evidence;
+pub(crate) mod m20240101_000041_ordered_receipts;
 
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 
@@ -58,7 +59,13 @@ use sea_orm_migration::{MigrationTrait, MigratorTrait};
 pub(crate) async fn validate_receipt_archive(
     db: &impl sea_orm::ConnectionTrait,
 ) -> Result<(), sea_orm::DbErr> {
-    m20240101_000035_execution_receipts::validate_archive(db).await
+    let migrated = db.query_one(sea_orm::Statement::from_string(db.get_database_backend(),
+    "SELECT 1 FROM seaql_migrations WHERE version='m20240101_000041_ordered_receipts' LIMIT 1".to_owned())).await?.is_some();
+    if migrated {
+        m20240101_000041_ordered_receipts::validate(db).await
+    } else {
+        m20240101_000035_execution_receipts::validate_archive(db).await
+    }
 }
 
 /// The bitrouter schema migrator — owns the ordered list of every
@@ -108,6 +115,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000038_eval_import_provenance::Migration),
             Box::new(m20240101_000039_resource_lifecycle::Migration),
             Box::new(m20240101_000040_usage_evidence::Migration),
+            Box::new(m20240101_000041_ordered_receipts::Migration),
         ]
     }
 }

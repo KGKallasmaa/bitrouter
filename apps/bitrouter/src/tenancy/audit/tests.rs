@@ -29,9 +29,13 @@ pub(super) struct Hooks {
 }
 impl Hooks {
     pub(super) fn receipt_sql(&self, sql: &str) -> String {
-        let Some(rest) = sql.strip_prefix("SELECT * FROM \"tenancy_execution_receipts\" ") else {
+        if !sql.starts_with("SELECT ")
+            || !sql.contains(" FROM \"tenancy_execution_receipts\" ")
+            || !sql.contains(" AS \"receipt_json\"")
+            || !sql.contains(" AS \"content_digest\"")
+        {
             return sql.to_owned();
-        };
+        }
         if !self.wrong_digest.swap(false, Ordering::SeqCst) {
             return sql.to_owned();
         }
@@ -40,7 +44,7 @@ impl Hooks {
         // predicate remain original. Never mutate SQLite's immutable file or
         // synthesize the decoder's error/fatal classification.
         format!(
-            "SELECT installation_id,tenant_id,execution_id,principal_id,correlation_id,receipt_json,CASE WHEN content_digest='{}' THEN '{}' ELSE '{}' END AS content_digest,content_digest AS fixture_original_digest,disposition_json,byte_count,unknown_outcome,recorded_at FROM \"tenancy_execution_receipts\" {rest}",
+            "SELECT installation_id,tenant_id,execution_id,principal_id,correlation_id,receipt_json,CASE WHEN content_digest='{}' THEN '{}' ELSE '{}' END AS content_digest,content_digest AS fixture_original_digest,disposition_json,receipt_format,byte_count,unknown_outcome,recorded_at FROM ({sql}) AS fixture_receipt",
             "0".repeat(64),
             "1".repeat(64),
             "0".repeat(64)

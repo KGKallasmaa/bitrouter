@@ -34,7 +34,10 @@ impl Worker {
         });
         let candidate = prepared.map_err(|_| Failure::from(ErrorCode::StorageUnavailable))?;
         #[cfg(test)]
-        let observation = self.proof.receipt_started_for_test(&candidate);
+        let observation = candidate
+            .v1()
+            .ok()
+            .and_then(|legacy| self.proof.receipt_started_for_test(legacy));
         #[cfg(test)]
         use crate::tenancy::transaction::receipt_observation::Step;
         let checked = control.check_read();
@@ -78,7 +81,7 @@ impl Worker {
             self.proof
                 .receipt_result_for_test(observation, Step::Check, &checked);
             checked?;
-            let insertion = store::insert(&transaction, &candidate).await;
+            let insertion = store::insert_terminal(&transaction, &candidate).await;
             #[cfg(test)]
             {
                 self.proof
@@ -88,15 +91,17 @@ impl Worker {
                 }
             }
             let inserted = insertion?;
-            crate::tenancy::receipts::auxiliary_store::insert(&transaction, &candidate).await?;
-            #[cfg(all(feature = "core", feature = "harness"))]
-            crate::tenancy::experiment::store::terminal::receipt(
-                &transaction,
-                owner,
-                &candidate,
-                &budget,
-            )
-            .await?;
+            if let store::format::Terminal::V1(legacy) = candidate.as_ref() {
+                crate::tenancy::receipts::auxiliary_store::insert(&transaction, legacy).await?;
+                #[cfg(all(feature = "core", feature = "harness"))]
+                crate::tenancy::experiment::store::terminal::receipt(
+                    &transaction,
+                    owner,
+                    legacy,
+                    &budget,
+                )
+                .await?;
+            }
             let checked = control.check_read();
             #[cfg(test)]
             self.proof

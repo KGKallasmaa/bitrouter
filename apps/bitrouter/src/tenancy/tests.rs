@@ -14,6 +14,7 @@ use super::{Service, command::Command, model::Caller, store::StoredResponse};
 mod authority;
 mod configuration;
 mod conformance;
+mod directory;
 #[cfg(feature = "core")]
 mod eval;
 pub(in crate::tenancy) mod execution;

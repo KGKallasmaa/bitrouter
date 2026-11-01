@@ -64,6 +64,15 @@ impl Worker {
                 )
                 .await
                 .map_err(|_| self.unavailable(ErrorCode::AuthorityUnavailable))?;
+                crate::tenancy::receipts::ordered::intent::recover(
+                    &self.db,
+                    &initial.installation,
+                    self.startup.as_ref(),
+                    &self.proof,
+                    &control,
+                )
+                .await
+                .map_err(|_| self.unavailable(ErrorCode::StorageUnavailable))?;
                 let inventory =
                     crate::tenancy::receipts::store::inventory(&self.db, &initial.installation)
                         .await
@@ -201,6 +210,48 @@ impl Worker {
             };
             let control = Control::new(self.proof.clone());
             match job {
+                Job::OrderedIntent(job) => {
+                    let result = self
+                        .supervise(
+                            self.execute_ordered_intent(&job, &control),
+                            &control,
+                            job.owner.attachment_deadline,
+                            Policy::Receipt,
+                            None,
+                        )
+                        .await;
+                    let cleanup_failed = if result.is_err()
+                        && Instant::now() >= job.owner.attachment_deadline
+                        && self.proof.disposition() == Disposition::NoTransaction
+                        && control.phase() == Phase::Preparing
+                        && self.current().is_ok()
+                    {
+                        // Queue expiry proved that no SQL future was polled.
+                        // Retain this same cancelled identity under its bounded
+                        // cleanup budget; it cannot authorize a provider send.
+                        job.owner.cancel();
+                        self.supervise(
+                            self.execute_ordered_intent(&job, &control),
+                            &control,
+                            job.owner.cleanup_deadline(),
+                            Policy::Receipt,
+                            None,
+                        )
+                        .await
+                        .is_err()
+                    } else {
+                        result.is_err()
+                    };
+                    if cleanup_failed {
+                        job.owner.fail(ErrorCode::StorageUnavailable);
+                    }
+                    if job.reply.send(result).is_err() {
+                        tracing::debug!("ordered intent waiter disconnected");
+                    }
+                    if self.proof.disposition() == Disposition::Ambiguous {
+                        self.quarantine(ordinary, safety, completions).await;
+                    }
+                }
                 Job::OAuth(job) => {
                     let result = self
                         .supervise(
@@ -476,6 +527,24 @@ impl Worker {
                     }
                     // Keep active command custody outside the caught work future.
                     drop((caller, command));
+                }
+                Job::Directory(read) => {
+                    let result = self
+                        .supervise(
+                            self.directory(&read, &control),
+                            &control,
+                            read.deadline,
+                            Policy::CredentialRead,
+                            None,
+                        )
+                        .await;
+                    if read.reply.send(result).is_err() {
+                        tracing::debug!("directory read completed without a response receiver");
+                    }
+                    if self.proof.disposition() == Disposition::Ambiguous {
+                        self.quarantine(ordinary, safety, completions).await;
+                    }
+                    drop(read.permit);
                 }
                 Job::Credential(CredentialRead {
                     caller,
@@ -835,6 +904,16 @@ impl Job {
                 job.exchange.owner.fail(ErrorCode::StorageUnavailable);
                 job.progress.finish(Err(ErrorCode::StorageUnavailable));
             }
+            Self::OrderedIntent(job) => {
+                job.owner.fail(ErrorCode::StorageUnavailable);
+                if job
+                    .reply
+                    .send(Err(ErrorCode::AuthorityUnavailable.into()))
+                    .is_err()
+                {
+                    tracing::debug!("rejected ordered intent waiter disconnected");
+                }
+            }
             Self::Receipt(owner) => owner.fail(ErrorCode::StorageUnavailable),
             Self::ReceiptRead(read) => {
                 let _ = read.reply.send(Err(ErrorCode::AuthorityUnavailable.into()));
@@ -960,6 +1039,15 @@ impl Job {
                     .is_err()
                 {
                     tracing::debug!("rejected HTTP continuation had no response receiver");
+                }
+            }
+            Self::Directory(read) => {
+                if read
+                    .reply
+                    .send(Err(ErrorCode::AuthorityUnavailable.into()))
+                    .is_err()
+                {
+                    tracing::debug!("rejected directory read had no response receiver");
                 }
             }
             Self::Credential(message) => {

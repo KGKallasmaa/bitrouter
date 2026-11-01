@@ -271,3 +271,5 @@ mod counts;
 
 #[cfg(all(feature = "core", feature = "harness"))]
 mod usage_evidence;
+
+mod ordered;
