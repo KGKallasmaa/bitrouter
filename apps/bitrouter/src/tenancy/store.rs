@@ -135,7 +135,7 @@ async fn installation(db: &impl ConnectionTrait, state: &Snapshot) -> Result<()>
         vec![
             ("singleton", 1_i32.into()),
             ("installation_id", state.installation.as_str().into()),
-            ("schema_version", 2_i32.into()),
+            ("schema_version", super::AUTHORITY_SCHEMA_VERSION.into()),
             (
                 "authority_revision",
                 i64::try_from(state.revision.get())?.into(),
@@ -564,7 +564,8 @@ pub(super) async fn load_existing(
 
 fn existing_identity(row: &QueryResult) -> Result<Snapshot> {
     ensure!(
-        row.try_get::<i32>("", "singleton")? == 1 && row.try_get::<i32>("", "schema_version")? == 2,
+        row.try_get::<i32>("", "singleton")? == 1
+            && row.try_get::<i32>("", "schema_version")? == super::AUTHORITY_SCHEMA_VERSION,
         "unsupported authority store identity"
     );
     let operations = u32::try_from(row.try_get::<i32>("", "operation_ids")?)?;
