@@ -72,6 +72,7 @@ pub(crate) struct Submission {
     principal: PrincipalId,
     credential: CredentialId,
     binding: DispatchIdentity,
+    configuration_defaults: bitrouter_ai::tenancy::generation_defaults::ConfigurationDefaults,
     deadline: deadline::Deadline,
     cancelled: tokio_util::sync::CancellationToken,
     #[cfg(all(feature = "core", feature = "harness"))]
@@ -276,6 +277,8 @@ impl Service {
             principal: credential.principal.clone(),
             credential: credential.id.clone(),
             binding,
+            configuration_defaults:
+                bitrouter_ai::tenancy::generation_defaults::ConfigurationDefaults::Apply,
             deadline: self.submission_deadline(),
             cancelled: tokio_util::sync::CancellationToken::new(),
             #[cfg(all(feature = "core", feature = "harness"))]
