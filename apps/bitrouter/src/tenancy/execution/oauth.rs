@@ -1,5 +1,5 @@
 //! Exact retained OAuth consumer gates; no public caller can construct these proofs.
-use super::{TenantExecution, authorize_route};
+use super::{TenantExecution, authorize_effect};
 use crate::gateway::pipeline::types::RoutingTarget;
 use crate::tenancy::oauth::{
     self, ModelStamp,
@@ -22,7 +22,7 @@ impl TenantExecution {
         let reference = self.route.match_candidate(target)?;
         self.service
             .with_dispatch_authority(&self.submission, |state| {
-                authorize_route(state, &self.submission, self.route.dependencies())?;
+                authorize_effect(state, &self.submission, &self.route)?;
                 let profile = self.service.oauth.get(self.installation_id(), &reference)?;
                 if self.route.is_ordered() && profile.is_some() {
                     return Err(ErrorCode::CapabilityMismatch);
@@ -118,7 +118,7 @@ impl TenantExecution {
     ) -> Result<(), ErrorCode> {
         self.service
             .with_dispatch_authority(&self.submission, |state| {
-                authorize_route(state, &self.submission, self.route.dependencies())?;
+                authorize_effect(state, &self.submission, &self.route)?;
                 self.route.require_oauth_messages(&exchange.target)?;
                 let metadata = self
                     .service

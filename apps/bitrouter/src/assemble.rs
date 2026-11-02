@@ -1584,6 +1584,10 @@ async fn assemble_app(
         ),
         None => None,
     };
+    #[cfg(any(feature = "otel-http", feature = "otel-grpc"))]
+    if let (Some(service), Some(exporter)) = (&tenancy, &otel_for_assembled) {
+        service.bind_operational_exporter(exporter.clone());
+    }
     let app = match &tenancy {
         Some(service) => app.with_tenancy(service.clone()),
         None => app,

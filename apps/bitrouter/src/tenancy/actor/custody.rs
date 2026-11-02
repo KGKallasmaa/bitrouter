@@ -2,6 +2,7 @@
 
 use std::future::{Future, pending};
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 
 use futures::FutureExt;
 use tokio::sync::mpsc;
@@ -64,6 +65,27 @@ impl Worker {
                 )
                 .await
                 .map_err(|_| self.unavailable(ErrorCode::AuthorityUnavailable))?;
+                // The import transaction may have initialized profile heads.
+                // Derive protection only from authenticated immutable resources,
+                // then publish both indices before any dispatch becomes ready.
+                let mut admitted = (*initial).clone();
+                admitted.resource_lifecycle = crate::tenancy::resources::lifecycle::load(
+                    &self.db,
+                    &initial.installation,
+                    initial.revision,
+                )
+                .await
+                .map_err(|_| self.unavailable(ErrorCode::AuthorityUnavailable))?;
+                admitted.resource_admission = self
+                    .resources
+                    .admission_state(&self.db, &admitted.resource_lifecycle)
+                    .await
+                    .map_err(|_| self.unavailable(ErrorCode::AuthorityUnavailable))?;
+                *self
+                    .snapshot
+                    .write()
+                    .map_err(|_| self.unavailable(ErrorCode::AuthorityUnavailable))? =
+                    Arc::new(admitted);
                 crate::tenancy::receipts::ordered::intent::recover(
                     &self.db,
                     &initial.installation,

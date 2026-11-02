@@ -143,7 +143,8 @@ impl MigrationTrait for Migration {
         {
             return Err(incompatible());
         }
-        // Legacy format is accepted here only. Serving readers require format 2.
+        // Only released format 1 migrates. Unreleased format 2 stores are never
+        // silently converted; serving format 3 fences predecessor binaries.
         let invalid = Query::select()
             .from(Alias::new("tenancy_installation"))
             .expr(Expr::val(1))
@@ -169,7 +170,7 @@ impl MigrationTrait for Migration {
         manager.create_table(intent_table(backend)).await?;
         let update = Query::update()
             .table(Alias::new("tenancy_installation"))
-            .value(Alias::new("schema_version"), 2)
+            .value(Alias::new("schema_version"), 3)
             .to_owned();
         db.execute(backend.build(&update)).await?;
         validate(db).await

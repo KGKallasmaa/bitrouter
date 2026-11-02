@@ -102,6 +102,7 @@ pub(super) struct Snapshot {
     pub active_configurations: BTreeMap<TenantId, RevisionId>,
     /// Managed heads and exact revocations; checked even for cached executions.
     pub resource_lifecycle: super::resources::lifecycle::State,
+    pub resource_admission: super::resources::admission::State,
 }
 
 /// Authentication produces this internal identity; requests cannot deserialize it.

@@ -1,5 +1,5 @@
 //! Selected controlled counting belongs to the original execution, never its callbacks.
-use super::{TenantExecution, authorize_route};
+use super::{TenantExecution, authorize_effect};
 use crate::gateway::pipeline::types::RoutingTarget;
 use crate::tenancy::receipts::auxiliary::count::{Identity, Permit};
 use bitrouter_ai::{tenancy::operation::ErrorCode, types::Prompt};
@@ -69,7 +69,7 @@ impl TenantExecution {
     ) -> Result<(), ErrorCode> {
         self.service
             .with_dispatch_authority(&self.submission, |state| {
-                authorize_route(state, &self.submission, self.route.dependencies())?;
+                authorize_effect(state, &self.submission, &self.route)?;
                 if self
                     .rejection
                     .lock()

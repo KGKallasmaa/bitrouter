@@ -543,6 +543,7 @@ pub(super) async fn load(db: &DatabaseConnection, now: DateTime<Utc>) -> Result<
             credential_hashes: Default::default(),
             active_configurations: Default::default(),
             resource_lifecycle: Default::default(),
+            resource_admission: Default::default(),
         };
         installation(db, &state).await?;
         state
@@ -588,6 +589,7 @@ fn existing_identity(row: &QueryResult) -> Result<Snapshot> {
         credential_hashes: Default::default(),
         active_configurations: Default::default(),
         resource_lifecycle: Default::default(),
+        resource_admission: Default::default(),
     })
 }
 
