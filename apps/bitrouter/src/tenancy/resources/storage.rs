@@ -102,7 +102,9 @@ pub(super) fn seal(resources: &Resources, artifact: &Artifact) -> Result<StoredR
         &artifact.definition,
         super::manifest::Definition::Credential { oauth: Some(_), .. }
     );
-    let version = if artifact.definition.is_profiled() {
+    let version = if artifact.definition.is_shared_profile() {
+        super::SHARED_HEALTH_COMPILER_VERSION
+    } else if artifact.definition.is_profiled() {
         super::PROFILED_COMPILER_VERSION
     } else if oauth {
         "tenancy-oauth-resource-v1"
@@ -143,6 +145,7 @@ pub(super) fn authenticate(resources: &Resources, record: StoredResource) -> Res
     ensure!(
         record.compiler_version == COMPILER_VERSION
             || record.compiler_version == super::PROFILED_COMPILER_VERSION
+            || record.compiler_version == super::SHARED_HEALTH_COMPILER_VERSION
             || record.compiler_version == "tenancy-oauth-resource-v1",
         "unsupported resource compiler"
     );
@@ -169,7 +172,10 @@ pub(super) fn authenticate(resources: &Resources, record: StoredResource) -> Res
     let artifact: Artifact = serde_json::from_slice(&bytes)?;
     ensure!(
         artifact.definition.is_profiled()
-            == (record.compiler_version == super::PROFILED_COMPILER_VERSION),
+            == (record.compiler_version == super::PROFILED_COMPILER_VERSION
+                || record.compiler_version == super::SHARED_HEALTH_COMPILER_VERSION)
+            && artifact.definition.is_shared_profile()
+                == (record.compiler_version == super::SHARED_HEALTH_COMPILER_VERSION),
         "admission resource compiler mismatch"
     );
     ensure!(

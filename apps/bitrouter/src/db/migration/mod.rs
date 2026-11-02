@@ -52,6 +52,7 @@ mod m20240101_000038_eval_import_provenance;
 mod m20240101_000039_resource_lifecycle;
 pub(crate) mod m20240101_000040_usage_evidence;
 pub(crate) mod m20240101_000041_ordered_receipts;
+pub(crate) mod m20240101_000042_shared_admission_health;
 
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
 
@@ -116,6 +117,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20240101_000039_resource_lifecycle::Migration),
             Box::new(m20240101_000040_usage_evidence::Migration),
             Box::new(m20240101_000041_ordered_receipts::Migration),
+            Box::new(m20240101_000042_shared_admission_health::Migration),
         ]
     }
 }
